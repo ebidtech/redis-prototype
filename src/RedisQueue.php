@@ -88,14 +88,58 @@ class RedisQueue
     public function consume($quantity = 1, $requireAck = false)
     {
         /* Enqueue expired messages. */
-        $delayQueue = $this->getDelayedQueue($this->queue);
-        $ackQueue   = $this->getAckQueue($this->queue);
-        $this->enqueueExpired($delayQueue, $this->queue);
-        $this->enqueueExpired($ackQueue, $this->queue);
+        $this->enqueueDelayed();
+        $this->enqueueUnacknowledged();
 
         return ($requireAck)
             ? $this->consumeWithAck($quantity)
             : $this->consumeWithoutAck($quantity);
+    }
+
+    /**
+     * Flushes all messages in a given queue, including messages in related support queues.
+     */
+    public function flushQueue()
+    {
+        $delayQueue      = $this->getDelayedQueue($this->queue);
+        $ackQueue        = $this->getAckQueue($this->queue);
+        $ackStorageQueue = $this->getAckStorageQueue($this->queue);
+
+        $this->client->del([$this->queue, $delayQueue, $ackQueue, $ackStorageQueue]);
+    }
+
+    /**
+     * Acknowledges the given list of messages.
+     *
+     * @param RedisEnvelope[] $messageList List of messages to acknowledge.
+     *
+     * @return void
+     */
+    public function acknowledge(array $messageList)
+    {
+        $ackQueue             = $this->getAckQueue($this->queue);
+        $ackStorageQueue      = $this->getAckStorageQueue($this->queue);
+        $encodedMessageIdList = array_map(
+            function (RedisEnvelope $message) {
+                return $message->getId();
+            },
+            $messageList
+        );
+
+        $script = <<<'LUA'
+local ack_queue, ack_storage_queue = KEYS[1], KEYS[2]
+
+-- Removes all acknowledged messages from the ack and ack_storage structures.
+redis.call('zrem', ack_queue, unpack(ARGV, 1, #ARGV))
+redis.call('hdel', ack_storage_queue, unpack(ARGV, 1, #ARGV))
+
+return true
+LUA;
+
+        call_user_func_array(
+            [$this->client, 'eval'],
+            array_merge([$script, 2, $ackQueue, $ackStorageQueue], $encodedMessageIdList)
+        );
     }
 
     /**
@@ -105,7 +149,7 @@ class RedisQueue
      *
      * @return string
      */
-    public function getDelayedQueue($queue)
+    protected function getDelayedQueue($queue)
     {
         return $queue . ':delayed';
     }
@@ -117,32 +161,21 @@ class RedisQueue
      *
      * @return string
      */
-    public function getAckQueue($queue)
+    protected function getAckQueue($queue)
     {
         return $queue . ':ack';
     }
 
     /**
-     * Flushes all messages in a given queue, including messages in related support queues.
-     */
-    public function flushQueue()
-    {
-        $delayQueue = $this->getDelayedQueue($this->queue);
-        $ackQueue   = $this->getAckQueue($this->queue);
-
-        $this->client->del([$this->queue, $delayQueue, $ackQueue]);
-    }
-
-    /**
-     * Acknowledges the given list of messages.
+     * Retrieves the acknowledgement storage queue name for a given queue.
      *
-     * @param RedisEnvelope[] $messageList List of messages to acknowledge.
+     * @param string $queue Original queue name.
+     *
+     * @return string
      */
-    public function acknowledge(array $messageList)
+    protected function getAckStorageQueue($queue)
     {
-        $ackQueue        = $this->getAckQueue($this->queue);
-        $encodedMessages = array_map('json_encode', $messageList);
-        $this->client->zrem($ackQueue, $encodedMessages);
+        return $queue . ':ack:storage';
     }
 
     /**
@@ -190,10 +223,10 @@ class RedisQueue
 local queue, quantity = KEYS[1], KEYS[2]
 
 -- Get a range of keys from the queue and remove them.
-local messages = redis.call('lrange', queue, 0, quantity - 1)
+local message_list = redis.call('lrange', queue, 0, quantity - 1)
 redis.call('ltrim', queue, quantity, -1)
 
-return messages
+return message_list
 LUA;
 
         return array_map(
@@ -212,26 +245,30 @@ LUA;
     protected function consumeWithAck($quantity)
     {
         $script = <<<'LUA'
-local queue, quantity, ack_queue, ack_expiration = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local queue, quantity, ack_queue, ack_storage_queue, ack_expiration = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
 
 -- Retrieves the required number of messages from the queue.
-local messages = redis.call('lrange', queue, 0, quantity - 1)
+local message_list = redis.call('lrange', queue, 0, quantity - 1)
 redis.call('ltrim', queue, quantity, -1)
 
-if(next(messages) ~= nil) then
+if(next(message_list) ~= nil) then
 
-    -- Build pairs using the expiration time as score.
-    local scored_pairs = {}
-    for _, message in next, messages, nil do
-        table.insert(scored_pairs, ack_expiration)
-        table.insert(scored_pairs, message)
+    -- Build both the mapped set and hash pairs.
+    local scored_pair_list, mapped_pair_list = {}, {}
+    for _, message in next, message_list, nil do
+        local decoded_message = cjson.decode(message)
+        table.insert(scored_pair_list, ack_expiration)
+        table.insert(scored_pair_list, decoded_message['id'])
+        table.insert(mapped_pair_list, decoded_message['id'])
+        table.insert(mapped_pair_list, message)
     end
     
-    -- Add the acknowledge messages to an ordered set.
-    redis.call('zadd', ack_queue, unpack(scored_pairs, 1, #scored_pairs))
+    -- Add the messages to both the ordered set and hash.
+    redis.call('zadd', ack_queue, unpack(scored_pair_list, 1, #scored_pair_list))
+    redis.call('hmset', ack_storage_queue, unpack(mapped_pair_list, 1, #mapped_pair_list))
 end
 
-return messages
+return message_list
 LUA;
 
         /** @noinspection PhpMethodParametersCountMismatchInspection */
@@ -239,10 +276,11 @@ LUA;
             '\Prototype\Redis\RedisEnvelope::jsonDeserialize',
             $this->client->eval(
                 $script,
-                4,
+                5,
                 $this->queue,
                 $quantity,
                 $this->getAckQueue($this->queue),
+                $this->getAckStorageQueue($this->queue),
                 $this->getAckExpirationTime()
             )
         );
@@ -251,24 +289,21 @@ LUA;
     }
 
     /**
-     * Moves expired messages to a new queue.
-     *
-     * @param string $originQueue      Name of the queue from which to consume.
-     * @param string $destinationQueue Name of the queue in which to publish.
+     * Moves delayed messages to a new queue.
      */
-    protected function enqueueExpired($originQueue, $destinationQueue)
+    protected function enqueueDelayed()
     {
         $script = <<<'LUA'
-local origin_queue, destination_queue, current_time = KEYS[1], KEYS[2], KEYS[3]
+local delayed_queue, queue, current_time = KEYS[1], KEYS[2], KEYS[3]
 
--- Retrieve 'expired' messages.
-local messages = redis.call('zrangebyscore', origin_queue, '-inf', current_time)
+-- Retrieve delayed messages.
+local message_list = redis.call('zrangebyscore', delayed_queue, '-inf', current_time)
 
--- Push any 'expired' messages into the queue (100 at a time).
-if(next(messages) ~= nil) then
-    redis.call('zremrangebyrank', origin_queue, 0, #messages - 1)
-    for i = 1, #messages, 100 do
-        redis.call('rpush', destination_queue, unpack(messages, i, math.min(i+99, #messages)))
+-- Push any delayed messages into the queue (100 at a time).
+if(next(message_list) ~= nil) then
+    redis.call('zremrangebyrank', delayed_queue, 0, #message_list - 1)
+    for i = 1, #message_list, 100 do
+        redis.call('rpush', queue, unpack(message_list, i, math.min(i+99, #message_list)))
     end
 end
 
@@ -276,6 +311,41 @@ return true
 LUA;
 
         /** @noinspection PhpMethodParametersCountMismatchInspection */
-        $this->client->eval($script, 3, $originQueue, $destinationQueue, $this->getCurrentTime());
+        $this->client->eval($script, 3, $this->getDelayedQueue($this->queue), $this->queue, $this->getCurrentTime());
+    }
+
+    /**
+     * Moves unacknowledged messages to a new queue.
+     */
+    protected function enqueueUnacknowledged()
+    {
+        $script = <<<'LUA'
+local ack_queue, ack_storage_queue, queue, current_time = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+
+-- Retrieve unacknowledged messages.
+local message_id_list = redis.call('zrangebyscore', ack_queue, '-inf', current_time)
+
+-- Push any unacknowledged messages into the queue (100 at a time).
+if(next(message_id_list) ~= nil) then
+    local message_list = redis.call('hmget', ack_storage_queue, unpack(message_id_list, 1, #message_id_list))
+    redis.call('zremrangebyrank', ack_queue, 0, #message_id_list - 1)
+    redis.call('hdel', ack_storage_queue, unpack(message_id_list, 1, #message_id_list))
+    for i = 1, #message_list, 100 do
+        redis.call('rpush', queue, unpack(message_list, i, math.min(i+99, #message_list)))
+    end
+end
+
+return true
+LUA;
+
+        /** @noinspection PhpMethodParametersCountMismatchInspection */
+        $this->client->eval(
+            $script,
+            4,
+            $this->getAckQueue($this->queue),
+            $this->getAckStorageQueue($this->queue),
+            $this->queue,
+            $this->getCurrentTime()
+        );
     }
 }

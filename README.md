@@ -136,6 +136,9 @@ is set, the message is automatically published to an "acknowledge shadow queue" 
 is also represented using an ordered set, but in this case the score represents the maximum time we should wait
 for the message to be acknowledged before publishing it again.
 
+There's also another "shadow queue" used as message storage. While the ordered sets contains only message identifiers
+and their respective scores, this new queue, represents by an hash, maps the message identifier to the message itself.
+
 As with delayed messages, this prototype will check for any expired acknowledge messages before every consume, 
 and publish those again in the original queue. As before, the process can be daemonized.
 
@@ -144,10 +147,14 @@ If a messages is acknowledged, it is removed from the shadow queue and is never 
 ### Limitations
 
 The first limitation is related to message identity. In order to acknowledge a message, removing it from the ordered
-set, it must be found. This is done by matching the entire message itself. In order for this to work as expected, 
-every message must have something that identify it uniquely. The proposed solution creates uses an unique identifier
-(UUID version 4) at the envelope level, to ensure that even if the message is similar to others, at least a little
-part of it is always unique.
+set, it must be found. To achieve this, the message should contain an unique identifier at its top level, under the
+key `id`. An optimization could be made to this by using the ordered set directly as message storage, removing the
+need for a second "shadow queue". However, this approach has a somewhat fragile subtlety: message identity match would
+be made on the entire message body, so a full, unaltered copy of the message would be needed in order to acknowledge it.
+
+The message identity problem introduces yet another limitation: messages must be encoded as JSON, and must contain a top
+level key named `id`. As this processing is done on Redis' side, the options here are quite limited. You can, however,
+represent the message data as you please, including compressed/encrypted/encoded.
 
 The second limitation is related to queue sharding. In sharded environments, you must always ensure a consistent
 key distribution in order for this to work. Supposed for example a round robin sharded system, where each queue
