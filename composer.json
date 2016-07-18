@@ -1,0 +1,13 @@
+{
+    "require": {
+        "ramsey/uuid": "~3.4",
+        "predis/predis": "~1.1",
+        "phpbench/phpbench": "~0.9"
+    },
+    "autoload": {
+        "psr-4": {
+            "Prototype\\Redis\\": "src/",
+            "Prototype\\Redis\\Benchmark\\": "benchmarks/"
+        }
+    }
+}
