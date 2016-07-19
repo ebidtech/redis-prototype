@@ -42,11 +42,19 @@ is expected to have no or little impact in performance.
 
 Benchmarks were performed using PHPBench (https://github.com/phpbench/phpbench).
 
-Every benchmark iteration started with a queue with 1000 messages. Messages where removed in increments of 50,
-until the queue was empty (20 revolutions). The test was comprised of a total of 10 iterations, resulting in
-a total of 10000 messages consumed.
+There were three independent tests performed, one for each of the proposed multiple consume solutions. They're 
+represented as:
+* `benchLpopConsecutive` Consumes with multiple client side `lpop` operations.
+* `benchLpopInternal` Consumes with a single Lua script.
+* `benchLpopPipeline` Consumes with multiple `lpop` operations within a pipeline.
+
+Each of these benchmarks started with a queue with 1000 messages. Messages are removed in increments of 50, until the 
+queue is empty (20 revolutions). Each benchmark is executed a total of 10 iterations.
 
 #### Results
+
+Each line of the following table represents a single iteration for a particular benchmark. Listed times and other 
+metrics refer to the average value of the 20 revolutions, for each iteration.
 
 ```
 \Prototype\Redis\Benchmark\RedisQueueSimpleBench
