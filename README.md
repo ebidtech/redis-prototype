@@ -131,8 +131,8 @@ be adapted to be performed within a daemon.
 
 Technically there is a maximum score limit that is supported by Redis, which would represent a maximum delay
 for messages, as scores represent unix timestamps. However, Redis ordered sets represent scores as IEEE 754 
-floating point number, which means that timestamps up to 2^53 can be safely used. Such a timestamp is hundreds
-of millions of years into the future.
+floating point numbers, which means that timestamps up to 2^53 can be safely used. Such a timestamp is hundreds
+of thousands of years into the future.
 
 Performance can also be a limitation, if the delayed queue transactions are performed before every consume. As
 explained above, the problem can be mitigated/eliminated by daemonizing the transactions.
