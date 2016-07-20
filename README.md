@@ -164,7 +164,7 @@ The message identity problem introduces yet another limitation: messages must be
 level key named `id`. As this processing is done on Redis' side, the options here are quite limited. You can, however,
 represent the message data as you please, including compressed/encrypted/encoded.
 
-The second limitation is related to queue sharding. In sharded environments, you must always ensure a consistent
+The final limitation is related to queue sharding. In sharded environments, you must always ensure a consistent
 key distribution in order for this to work. Supposed for example a round robin sharded system, where each queue
 is sharded in multiple Redis nodes. In order to acknowledge a message you must ensure that the acknowledgement
 request is always sent to the same node where the message was originally consumed. If this is not enforced you
