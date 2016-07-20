@@ -144,8 +144,8 @@ is set, the message is automatically published to an "acknowledge shadow queue" 
 is also represented using an ordered set, but in this case the score represents the maximum time we should wait
 for the message to be acknowledged before publishing it again.
 
-There's also another "shadow queue" used as message storage. While the ordered sets contains only message identifiers
-and their respective scores, this new queue, represents by an hash, maps the message identifier to the message itself.
+There's also another "shadow queue" used as message storage. While the ordered set contains only message identifiers
+and their respective scores, this new queue, represented by an hash, maps the message identifier to the message itself.
 
 As with delayed messages, this prototype will check for any expired acknowledge messages before every consume, 
 and publish those again in the original queue. As before, the process can be daemonized.
